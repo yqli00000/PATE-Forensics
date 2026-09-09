@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+from contextlib import nullcontext
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 import io
 import json
@@ -26,8 +27,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Second-stage script: read existing JSON and mask files. "
-            "For real samples, copy the original JSON to a new JSON folder. "
-            "For fake samples, call the API to refine 'Visible forgery traces' and save the modified JSON to the new folder. "
+            "Refine 'Visible forgery traces' for both real and fake predictions using a vision-language API. "
+            "Save the modified JSON to a separate folder while preserving classification and bounding boxes. "
             "Original JSON files will not be overwritten."
         )
     )
@@ -447,14 +448,17 @@ def generate_visible_forgery_traces_from_old_text(
             logger.warning("skip_api reason=no_api_url image=%s", image_name)
         return append_summary(old_traces, prediction)
 
-    if max_api_calls is not None and get_stat(api_stats, "api_calls", lock=api_stats_lock) >= max_api_calls:
+    # Reserve a request under one lock so concurrent workers cannot exceed the limit.
+    with api_stats_lock if api_stats_lock is not None else nullcontext():
+        limit_reached = max_api_calls is not None and get_stat(api_stats, "api_calls") >= max_api_calls
+        if not limit_reached:
+            increment_stat(api_stats, "api_calls")
+    if limit_reached:
         if logger:
             logger.warning("skip_api reason=max_api_calls image=%s limit=%s", image_name, max_api_calls)
         return append_summary(old_traces, prediction)
 
     try:
-        increment_stat(api_stats, "api_calls", lock=api_stats_lock)
-
         if logger:
             logger.info("call_api image=%s model=%s", image_name, api_model)
 
@@ -511,6 +515,7 @@ def generate_visible_forgery_traces_from_old_text(
             ],
             max_tokens=int(max_tokens),
         )
+        content = completion.choices[0].message.content
 
     except Exception as exc:
         increment_stat(api_stats, "api_failed", lock=api_stats_lock)
@@ -536,7 +541,6 @@ def generate_visible_forgery_traces_from_old_text(
                 getattr(usage, "total_tokens", None),
             )
 
-    content = completion.choices[0].message.content
     if isinstance(content, str) and content.strip():
         return append_summary(content.strip(), prediction)
 
@@ -577,12 +581,15 @@ def update_one_record(
 ) -> Dict[str, object]:
     image_path = Path(image_path)
     output_dir = Path(output_dir)
-    new_json_dir = ensure_dir(Path(new_json_dir))
+    new_json_dir = Path(new_json_dir)
 
     output_stem = build_output_stem(image_path.name)
     old_json_path = output_dir / "json" / f"{output_stem}.json"
     mask_path = output_dir / "mask" / f"{output_stem}.png"
     new_json_path = new_json_dir / f"{output_stem}.json"
+    if new_json_path.resolve() == old_json_path.resolve():
+        raise ValueError("The refined JSON must not overwrite the original JSON file.")
+    ensure_dir(new_json_dir)
 
     if not image_path.exists():
         increment_stat(api_stats, "missing_image", lock=api_stats_lock)
@@ -713,6 +720,8 @@ def main() -> None:
 
     output_dir = Path(args.output_dir)
     new_json_dir = Path(args.new_json_dir) if args.new_json_dir else output_dir / "json_api_refined"
+    if new_json_dir.resolve() == (output_dir / "json").resolve():
+        raise ValueError("--new-json-dir must differ from the original json/ directory.")
     ensure_dir(new_json_dir)
 
     logger = configure_logger(output_dir, args.log_file)

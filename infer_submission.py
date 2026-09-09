@@ -1,22 +1,17 @@
 from __future__ import annotations
 
 import argparse
-import base64
-from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 import io
 import json
 import logging
 import math
-import os
 import re
-import threading
 from pathlib import Path
-from typing import Any, Dict, List, MutableMapping, Sequence
+from typing import Any, Dict, List, Sequence
 
 import cv2
 import numpy as np
 import torch
-from openai import OpenAI
 from PIL import Image
 from PIL import ImageFile
 from torchvision import transforms
@@ -29,7 +24,7 @@ ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run DDL inference and export submission-style JSON files.")
+    parser = argparse.ArgumentParser(description="Run image-forensics inference and export prediction JSON files.")
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--image-path", default=None)
     parser.add_argument("--image-dir", default=None)
@@ -44,13 +39,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mask-threshold", type=float, default=0.5)
     parser.add_argument("--min-box-area", type=int, default=16)
     parser.add_argument("--save-mask-png", action="store_true")
-    parser.add_argument("--explain-api-url", default="https://dashscope.aliyuncs.com/compatible-mode/v1")
-    parser.add_argument("--explain-api-key", default=None)
-    parser.add_argument("--explain-model", default="qwen3.6-plus")
-    parser.add_argument("--explain-timeout", type=int, default=60)
-    parser.add_argument("--explain-max-tokens", type=int, default=80)
-    parser.add_argument("--explain-workers", type=int, default=1, help="Number of concurrent explain API calls.")
-    parser.add_argument("--max-api-calls", type=int, default=None, help="Stop calling the explain API after this many calls.")
     parser.add_argument("--log-file", default=None, help="Write runtime logs here. Defaults to output-dir/infer_submission.log.")
     parser.add_argument("--summary-json", default=None, help="Write run summary here. Defaults to output-dir/infer_summary.json.")
     parser.add_argument("--score-jsonl", default=None, help="Write per-image logits/probabilities here. Defaults to output-dir/infer_scores.jsonl.")
@@ -95,24 +83,6 @@ def collect_image_paths(image_path: str | None, image_dir: str | None) -> List[P
     return image_paths
 
 
-def guess_mime_type(filename: str, default: str = "image/png") -> str:
-    suffix = Path(filename).suffix.lower()
-    mapping = {
-        ".png": "image/png",
-        ".jpg": "image/jpeg",
-        ".jpeg": "image/jpeg",
-        ".webp": "image/webp",
-        ".bmp": "image/bmp",
-        ".tif": "image/tiff",
-        ".tiff": "image/tiff",
-    }
-    return mapping.get(suffix, default)
-
-
-def encode_data_url(data: bytes, mime_type: str) -> str:
-    return f"data:{mime_type};base64,{base64.b64encode(data).decode('utf-8')}"
-
-
 def build_inference_transform(image_size: int) -> transforms.Compose:
     """
     Inference uses full-image resize to 512x512 by default.
@@ -151,9 +121,9 @@ def restore_mask_to_original_size(pred_mask_prob: np.ndarray, original_width: in
 
 def normalize_box_to_submission(box: Sequence[int], original_width: int, original_height: int) -> List[int]:
     """
-    Convert [x1, y1, x2, y2] from original-image coordinates into the submission scale.
+    Convert [x1, y1, x2, y2] from original-image coordinates into normalized 0–1000 coordinates.
 
-    Submission rule:
+    Coordinate convention:
     x' = round(x / W * 1000)
     y' = round(y / H * 1000)
     """
@@ -179,7 +149,7 @@ def compute_bounding_boxes(
     1. Restore the predicted mask to the original image size.
     2. Threshold the restored mask.
     3. Extract connected components.
-    4. Convert each region into [x1, y1, x2, y2] and normalize to submission coordinates.
+    4. Convert each region into [x1, y1, x2, y2] and normalize to 0–1000 coordinates.
     """
     if prediction == "real":
         return []
@@ -238,171 +208,6 @@ def append_summary(text: str, prediction: str) -> str:
     return f"{text.rstrip()}\n\n{summary}"
 
 
-def build_overlay_image_bytes(image_bytes: bytes, mask_bytes: bytes, *, alpha: int = 95) -> bytes:
-    image = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
-    mask = Image.open(io.BytesIO(mask_bytes)).convert("L").resize(image.size, resample=Image.Resampling.NEAREST)
-    mask_np = np.array(mask)
-    overlay_alpha = Image.fromarray(((mask_np > 0).astype(np.uint8) * int(alpha)).astype(np.uint8), mode="L")
-    overlay = Image.new("RGBA", image.size, (235, 60, 45, 0))
-    overlay.putalpha(overlay_alpha)
-    blended = Image.alpha_composite(image, overlay).convert("RGB")
-    buffer = io.BytesIO()
-    blended.save(buffer, format="PNG")
-    return buffer.getvalue()
-
-
-def increment_stat(
-    api_stats: MutableMapping[str, int] | None,
-    key: str,
-    amount: int = 1,
-    lock: threading.Lock | None = None,
-) -> None:
-    if api_stats is None:
-        return
-    if lock is None:
-        api_stats[key] = api_stats.get(key, 0) + amount
-        return
-    with lock:
-        api_stats[key] = api_stats.get(key, 0) + amount
-
-
-def get_stat(api_stats: MutableMapping[str, int] | None, key: str, lock: threading.Lock | None = None) -> int:
-    if api_stats is None:
-        return 0
-    if lock is None:
-        return api_stats.get(key, 0)
-    with lock:
-        return api_stats.get(key, 0)
-
-
-def generate_visible_forgery_traces(
-    image_bytes: bytes,
-    image_name: str,
-    mask_bytes: bytes,
-    mask_name: str,
-    prediction: str,
-    fake_probability: float,
-    boxes: Sequence[Sequence[int]],
-    *,
-    api_url: str | None,
-    api_key: str | None,
-    api_model: str,
-    timeout: int,
-    max_tokens: int,
-    max_api_calls: int | None = None,
-    api_stats: MutableMapping[str, int] | None = None,
-    api_stats_lock: threading.Lock | None = None,
-    logger: logging.Logger | None = None,
-) -> str:
-    """
-    Main function 3: call an external API to generate the text explanation.
-
-    Note:
-    - If `api_url` is not provided, the function falls back to a local template.
-    - If the API request fails, inference still continues and uses the fallback text.
-    - The request payload is generic JSON and can be adapted to your final API schema.
-    """
-    if not api_url:
-        if logger:
-            logger.info("skip_api image=%s reason=no_api_url", image_name)
-        return _build_fallback_traces(prediction, fake_probability, boxes)
-    if prediction == 'real':
-        increment_stat(api_stats, "skipped_real", lock=api_stats_lock)
-        return _build_fallback_traces(prediction, fake_probability, boxes)
-    if max_api_calls is not None and get_stat(api_stats, "api_calls", lock=api_stats_lock) >= max_api_calls:
-        if logger:
-            logger.warning("skip_api image=%s reason=max_api_calls limit=%s", image_name, max_api_calls)
-        return _build_fallback_traces(prediction, fake_probability, boxes)
-    else:
-        try:
-            increment_stat(api_stats, "api_calls", lock=api_stats_lock)
-            if logger:
-                logger.info("call_api image=%s model=%s boxes=%d", image_name, api_model, len(boxes))
-            client = OpenAI(
-                api_key=api_key or os.getenv("DASHSCOPE_API_KEY"),
-                base_url=api_url,
-                timeout=float(timeout),
-            )
-            completion = client.chat.completions.create(
-                model=api_model,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": encode_data_url(image_bytes, guess_mime_type(image_name)),
-                                },
-                            },
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": encode_data_url(
-                                        build_overlay_image_bytes(image_bytes, mask_bytes),
-                                        "image/png",
-                                    ),
-                                },
-                            },
-                            {
-                                "type": "text",
-                                "text": (
-                                    "You are writing an official image-forensics annotation.\n\n"
-                                    "The first image is the original image. The second image is the same image with a "
-                                    "semi-transparent red overlay marking predicted suspicious regions. Use the overlay "
-                                    "only to focus your forensic analysis; do not mention the overlay or mask in the final answer.\n\n"
-                                    f"The classification result is {prediction}. "
-                                    f"The predicted bounding boxes are {json.dumps([list(box) for box in boxes])} in normalized 0-1000 coordinates.\n\n"
-                                    "Write a detailed visible-evidence explanation in the style of a forensic dataset annotation.\n\n"
-                                    "Requirements:\n"
-                                    "- Begin with one natural paragraph describing the image content: subject, visible attributes, "
-                                    "clothing or accessories, background, camera setting, and lighting.\n"
-                                    "- Then analyze visible forensic evidence using markdown bullet points.\n"
-                                    "- Each bullet point must start with a bold, specific forensic heading written in your own words, "
-                                    "tailored to the actual visible evidence rather than copied from a fixed checklist.\n"
-                                    "- For fake images, focus on localized visible artifacts such as skin texture discontinuity, "
-                                    "lighting or shadow mismatch, abnormal eye reflections, unnatural facial geometry, boundary blending, "
-                                    "resolution mismatch, color inconsistency, or texture artifacts.\n"
-                                    "- For real images, explain why visible evidence appears consistent, including natural lighting, "
-                                    "coherent shadows, organic edges, realistic texture, physical plausibility, depth of field, and absence of copy-paste artifacts.\n"
-                                    "- Refer to concrete visible regions when possible, such as eyes, eyelids, nose bridge, lips, hairline, cheek, jawline, clothing edges, background text, or object boundaries.\n"
-                                    "- Keep the tone observational and technical, not conversational.\n"
-                                    "- Do not mention confidence scores, model thresholds, algorithms, bounding box coordinates, or that a mask/overlay was provided.\n"
-                                    "- Do not include a final Summary sentence; it will be appended separately."
-                                ),
-                            },
-                        ],
-                    }
-                ],
-                max_tokens=int(max_tokens),
-            )
-        except Exception as exc:
-            increment_stat(api_stats, "api_failed", lock=api_stats_lock)
-            if logger:
-                logger.warning("api_failed image=%s error=%s: %s", image_name, type(exc).__name__, exc)
-            return _build_fallback_traces(prediction, fake_probability, boxes)
-
-        if api_stats is not None:
-            increment_stat(api_stats, "api_succeeded", lock=api_stats_lock)
-            usage = getattr(completion, "usage", None)
-            for usage_key in ("prompt_tokens", "completion_tokens", "total_tokens"):
-                value = getattr(usage, usage_key, None) if usage is not None else None
-                if isinstance(value, int):
-                    increment_stat(api_stats, usage_key, amount=value, lock=api_stats_lock)
-            if logger and usage is not None:
-                logger.info(
-                    "api_usage image=%s prompt_tokens=%s completion_tokens=%s total_tokens=%s",
-                    image_name,
-                    getattr(usage, "prompt_tokens", None),
-                    getattr(usage, "completion_tokens", None),
-                    getattr(usage, "total_tokens", None),
-                )
-        content = completion.choices[0].message.content
-        if isinstance(content, str) and content.strip():
-            return append_summary(content.strip(), prediction)
-    return _build_fallback_traces(prediction, fake_probability, boxes)
-
-
 def build_json_record(boxes: Sequence[Sequence[int]], traces: str, prediction: str) -> Dict[str, object]:
     return {
         "Bounding boxes": [list(box) for box in boxes],
@@ -445,22 +250,13 @@ def run_single_image_inference(
     fake_threshold: float = 0.5,
     mask_threshold: float = 0.5,
     min_box_area: int = 16,
-    explain_api_url: str | None = None,
-    explain_api_key: str | None = None,
-    explain_model: str = "qwen3.6-plus",
-    explain_timeout: int = 60,
-    explain_max_tokens: int = 80,
-    max_api_calls: int | None = None,
     save_mask_png: bool = True,
     reuse_existing_traces: bool = False,
-    defer_traces: bool = False,
-    api_stats: MutableMapping[str, int] | None = None,
-    api_stats_lock: threading.Lock | None = None,
     logger: logging.Logger | None = None,
 ) -> Dict[str, object]:
     """
     Read one image, run inference, restore the predicted mask to original size,
-    save the mask PNG, and return the submission-style record plus file paths.
+    save the mask PNG, and return the prediction record plus file paths.
     """
     image_path = Path(image_path)
     output_dir = Path(output_dir)
@@ -505,45 +301,7 @@ def run_single_image_inference(
 
     traces = load_existing_traces(json_path) if reuse_existing_traces else None
     if traces is None:
-        if defer_traces and prediction == "fake":
-            return {
-                "image_path": str(image_path),
-                "json_path": str(json_path),
-                "mask_path": str(mask_path),
-                "prediction": prediction,
-                "fake_confidence": fake_probability,
-                "fake_logit": fake_logit,
-                "bounding_boxes": boxes,
-                "visible_forgery_traces": None,
-                "_trace_payload": {
-                    "image_bytes": image_bytes,
-                    "image_name": image_path.name,
-                    "mask_bytes": mask_bytes,
-                    "mask_name": mask_path.name,
-                    "prediction": prediction,
-                    "fake_probability": fake_probability,
-                    "boxes": boxes,
-                    "json_path": str(json_path),
-                },
-            }
-        traces = generate_visible_forgery_traces(
-            image_bytes,
-            image_path.name,
-            mask_bytes,
-            mask_path.name,
-            prediction,
-            fake_probability,
-            boxes,
-            api_url=explain_api_url,
-            api_key=explain_api_key,
-            api_model=explain_model,
-            timeout=explain_timeout,
-            max_tokens=explain_max_tokens,
-            max_api_calls=max_api_calls,
-            api_stats=api_stats,
-            api_stats_lock=api_stats_lock,
-            logger=logger,
-        )
+        traces = _build_fallback_traces(prediction, fake_probability, boxes)
     write_json_record(json_path, boxes, traces, prediction)
 
     return {
@@ -568,17 +326,8 @@ def run_batch_image_inference(
     fake_threshold: float = 0.5,
     mask_threshold: float = 0.5,
     min_box_area: int = 16,
-    explain_api_url: str | None = None,
-    explain_api_key: str | None = None,
-    explain_model: str = "qwen3.6-plus",
-    explain_timeout: int = 60,
-    explain_max_tokens: int = 80,
-    max_api_calls: int | None = None,
     save_mask_png: bool = True,
     reuse_existing_traces: bool = False,
-    defer_traces: bool = False,
-    api_stats: MutableMapping[str, int] | None = None,
-    api_stats_lock: threading.Lock | None = None,
     logger: logging.Logger | None = None,
 ) -> List[Dict[str, object]]:
     output_dir = Path(output_dir)
@@ -675,48 +424,7 @@ def run_batch_image_inference(
 
         traces = load_existing_traces(json_path) if reuse_existing_traces else None
         if traces is None:
-            if defer_traces and prediction == "fake":
-                results.append(
-                    {
-                        "image_path": str(image_path),
-                        "json_path": str(json_path),
-                        "mask_path": str(mask_path),
-                        "prediction": prediction,
-                        "fake_confidence": fake_probability,
-                        "fake_logit": fake_logit,
-                        "bounding_boxes": boxes,
-                        "visible_forgery_traces": None,
-                        "_trace_payload": {
-                            "image_bytes": image_bytes,
-                            "image_name": image_path.name,
-                            "mask_bytes": mask_bytes,
-                            "mask_name": mask_path.name,
-                            "prediction": prediction,
-                            "fake_probability": fake_probability,
-                            "boxes": boxes,
-                            "json_path": str(json_path),
-                        },
-                    }
-                )
-                continue
-            traces = generate_visible_forgery_traces(
-                image_bytes,
-                image_path.name,
-                mask_bytes,
-                mask_path.name,
-                prediction,
-                fake_probability,
-                boxes,
-                api_url=explain_api_url,
-                api_key=explain_api_key,
-                api_model=explain_model,
-                timeout=explain_timeout,
-                max_tokens=explain_max_tokens,
-                max_api_calls=max_api_calls,
-                api_stats=api_stats,
-                api_stats_lock=api_stats_lock,
-                logger=logger,
-            )
+            traces = _build_fallback_traces(prediction, fake_probability, boxes)
         write_json_record(json_path, boxes, traces, prediction)
         results.append(
             {
@@ -733,25 +441,6 @@ def run_batch_image_inference(
     return results
 
 
-def resolve_deferred_traces(payload: Dict[str, Any], explain_args: Dict[str, Any]) -> Dict[str, object]:
-    traces = generate_visible_forgery_traces(
-        payload["image_bytes"],
-        payload["image_name"],
-        payload["mask_bytes"],
-        payload["mask_name"],
-        payload["prediction"],
-        payload["fake_probability"],
-        payload["boxes"],
-        **explain_args,
-    )
-    json_path = Path(payload["json_path"])
-    write_json_record(json_path, payload["boxes"], traces, payload["prediction"])
-    return {
-        "json_path": str(json_path),
-        "visible_forgery_traces": traces,
-    }
-
-
 def main() -> None:
     args = parse_args()
     logger = configure_logger(args.output_dir, args.log_file)
@@ -766,47 +455,13 @@ def main() -> None:
         end_index = None if args.end_index is None else max(start_index, int(args.end_index))
         image_paths = image_paths[start_index:end_index]
     elif args.limit_images is not None:
-        image_paths = image_paths[max(0, int(args.limit_images)):]
+        image_paths = image_paths[: max(0, int(args.limit_images))]
     results = []
-    api_stats: Dict[str, int] = {}
-    api_stats_lock = threading.Lock()
-    explain_workers = max(1, int(args.explain_workers))
-    max_pending_explains = max(1, explain_workers * 4)
-    explain_args = {
-        "api_url": args.explain_api_url,
-        "api_key": args.explain_api_key,
-        "api_model": args.explain_model,
-        "timeout": args.explain_timeout,
-        "max_tokens": args.explain_max_tokens,
-        "max_api_calls": args.max_api_calls,
-        "api_stats": api_stats,
-        "api_stats_lock": api_stats_lock,
-        "logger": logger,
-    }
-
-    def collect_finished_explains(
-        pending: MutableMapping[Future, Dict[str, object]],
-        *,
-        block: bool = False,
-    ) -> None:
-        if not pending:
-            return
-        timeout = None if block else 0
-        done, _ = wait(pending.keys(), timeout=timeout, return_when=FIRST_COMPLETED)
-        for future in done:
-            result = pending.pop(future)
-            trace_result = future.result()
-            result["visible_forgery_traces"] = trace_result["visible_forgery_traces"]
-            results.append(result)
-
     batch_size = max(1, int(args.batch_size))
-
-    with ThreadPoolExecutor(max_workers=explain_workers) as explain_executor:
-        pending_explains: Dict[Future, Dict[str, object]] = {}
-        progress = tqdm(total=len(image_paths), desc="Infer", dynamic_ncols=True)
+    with tqdm(total=len(image_paths), desc="Infer", dynamic_ncols=True) as progress:
         for batch_start in range(0, len(image_paths), batch_size):
             batch_paths = image_paths[batch_start : batch_start + batch_size]
-            batch_results = run_batch_image_inference(
+            results.extend(run_batch_image_inference(
                 model,
                 device,
                 batch_paths,
@@ -815,34 +470,11 @@ def main() -> None:
                 fake_threshold=args.fake_threshold,
                 mask_threshold=args.mask_threshold,
                 min_box_area=args.min_box_area,
-                explain_api_url=args.explain_api_url,
-                explain_api_key=args.explain_api_key,
-                explain_model=args.explain_model,
-                explain_timeout=args.explain_timeout,
-                explain_max_tokens=args.explain_max_tokens,
-                max_api_calls=args.max_api_calls,
                 save_mask_png=args.save_mask_png,
                 reuse_existing_traces=args.reuse_existing_traces,
-                defer_traces=explain_workers > 1,
-                api_stats=api_stats,
-                api_stats_lock=api_stats_lock,
                 logger=logger,
-            )
-            for result in batch_results:
-                payload = result.pop("_trace_payload", None)
-                if payload is None:
-                    results.append(result)
-                else:
-                    future = explain_executor.submit(resolve_deferred_traces, payload, explain_args)
-                    pending_explains[future] = result
-                    if len(pending_explains) >= max_pending_explains:
-                        collect_finished_explains(pending_explains, block=True)
-            collect_finished_explains(pending_explains, block=False)
+            ))
             progress.update(len(batch_paths))
-        progress.close()
-
-        while pending_explains:
-            collect_finished_explains(pending_explains, block=True)
 
     summary_path = Path(args.summary_json) if args.summary_json else Path(args.output_dir) / "infer_summary.json"
     ensure_dir(summary_path.parent)
@@ -861,7 +493,7 @@ def main() -> None:
         "fake_threshold": args.fake_threshold,
         "mask_threshold": args.mask_threshold,
         "min_box_area": args.min_box_area,
-        "api_stats": api_stats,
+        "api_stats": {},
     }
     summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     logger.info("summary_json=%s", summary_path)

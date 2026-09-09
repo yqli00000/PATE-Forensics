@@ -1,13 +1,13 @@
-# PATE-Forensics Training and Inference Reproduction
+# PATE-Forensics
 
-`PATE-Forensics` is the implementation code for training and inference in the [DDL competition](https://ai-safety-workshop-ijcai2026.github.io/Track3.html). It contains source code, the main training configuration, inference scripts, dependency files, and reserved locations for the final model checkpoint, DINOv3 backbone, and datasets.
+`PATE-Forensics` is a research codebase for image forgery detection, localization, and visual evidence description. It provides training and inference code, a reference training configuration, and a two-stage workflow: local model inference followed by optional vision-language API refinement of textual explanations.
 
 ## Contents
 
 - `train.py`: Lightning training entrypoint.
 - `infer.py`: shared checkpoint/model loading utilities used by `infer_submission.py`.
-- `infer_submission.py`: required submission inference script.
-- `update_json_traces.py`: required second-stage JSON trace refinement script.
+- `infer_submission.py`: local detection and localization inference with JSON export.
+- `update_json_traces.py`: optional second-stage visual evidence description refinement.
 - `data/`, `engine/`, `networks/`, `utils/`: source modules required for training and inference.
 - `cfgs/train/gps_dino_mask_mixed_phase1_phase2_wo_maskloss.yaml`: main reference training configuration.
 - `weights/`: reserved checkpoint location.
@@ -15,13 +15,17 @@
 
 ## Environment
 
-Create a Python environment and install dependencies:
+The project uses Python 3.10. Create and activate an environment, then install the pinned dependencies from the repository root:
 
 ```bash
-pip install -r requirements.txt
+conda create -n pate-forensics python=3.10 -y
+conda activate pate-forensics
+python -m pip install -r requirements.txt
 ```
 
-The project was developed with Python 3.12, PyTorch, TorchVision, Lightning, OmegaConf/Hydra, OpenCV, Pillow, NumPy, scikit-learn, tqdm, rich, and the OpenAI-compatible client library.
+The dependency versions are specified in [requirements.txt](requirements.txt), including PyTorch 2.5.1, TorchVision 0.20.1, Lightning 2.6.5, NumPy 1.26.4, Transformers 5.14.1, and the OpenAI-compatible client library 2.48.0. Use this file as the dependency reference for experiment reproduction.
+
+Run the training and inference scripts directly from the repository root. The project does not require package installation; `pyproject.toml` contains only pytest configuration.
 
 ## Required External Files
 
@@ -44,7 +48,7 @@ weights/model_best.ckpt
 
 The `model_best.ckpt` checkpoint can be downloaded from [Google Drive](https://drive.google.com/file/d/12xMXHFRo6fcOEh0vfw2yhyM5RD53nbYY/view?usp=sharing).
 
-If the DINOv3 path saved in the checkpoint differs on the target machine, use `--backbone-path` during submission inference.
+If the DINOv3 path saved in the checkpoint differs on the target machine, use `--backbone-path` during inference.
 
 
 ### Dataset
@@ -81,13 +85,28 @@ To resume from a checkpoint, example command is:
 python train.py --cfg cfgs/train/gps_dino_mask_mixed_phase1_phase2_wo_maskloss.yaml --resume weights/model_best.ckpt --logdir gps_dino_mask_mixed_phase1_phase2_resume
 ```
 
-## Submission Inference
+## Inference
 
-Run image-folder inference and export JSON files with the provided script:
+Run commands from the repository root. Edit the checkpoint, input, output, and device settings in the launcher before running:
 
 ```bash
 bash infer_submission.sh
 ```
+
+The launcher uses an image size of 768, batch size of 4, classification threshold of 0.5, mask threshold of 0.4, and minimum component area of 8 pixels. An equivalent direct invocation is:
+
+```bash
+python infer_submission.py \
+  --checkpoint weights/model_best.ckpt \
+  --backbone-path weights/dinov3-l16 \
+  --image-dir /path/to/images \
+  --output-dir outputs/test \
+  --image-size 768 --batch-size 4 --device cuda \
+  --fake-threshold 0.5 --mask-threshold 0.4 --min-box-area 8 \
+  --save-mask-png
+```
+
+The Python defaults differ from the launcher: image size 512, batch size 8, mask threshold 0.5, and minimum component area 16. Specify these settings explicitly when reproducing an experiment. Input images are resized without cropping; predicted masks are resized back to the original image dimensions before thresholding and connected-component extraction.
 
 Outputs are written under:
 
@@ -98,22 +117,29 @@ outputs/test/infer_summary.json
 outputs/test/infer_scores.jsonl
 ```
 
-`infer_submission.py` can call an OpenAI-compatible vision API to generate detailed visible-trace text. If no valid API key is available, it falls back to local template text. For DashScope-compatible usage, set:
+Each image JSON contains `Classification result` (`real` or `fake`), `Bounding boxes`, and `Visible forgery traces`. Boxes use inclusive `[x1, y1, x2, y2]` pixel endpoints scaled by image width/height to 0–1000. Predictions classified as real have empty boxes and zero masks. Mask PNG files are written only with `--save-mask-png`; they are needed for second-stage refinement of fake predictions.
+
+This stage runs locally and makes no API calls. The trace field contains deterministic template text, or existing text when `--reuse-existing-traces` is enabled. Template text is not an independently generated visual explanation. API options and prompts belong exclusively to `update_json_traces.py`; the first-stage script no longer accepts `--explain-*` or `--max-api-calls`.
+
+Use `--limit-images N` to process the first N sorted images, or `--start-index` / `--end-index` for a slice (which takes precedence over the limit). Export names use image filename stems, so input images must have unique stems even across subdirectories. Decode failures are logged and retain the legacy placeholder output (`real`, probability 0, and an error description); these placeholders must be excluded from evaluation.
+
+The existing script filenames are retained for compatibility.
+
+## Visual Evidence Description Refinement
+
+Optionally refine explanations without rerunning the detection model:
 
 ```bash
 export DASHSCOPE_API_KEY=your_key
-```
-
-`infer_submission.py` supports calling the API directly during inference. To enable API-based trace generation, set `--explain-api-url`, provide `--explain-api-key` or `DASHSCOPE_API_KEY`, and control the number of API requests with parameters such as `--max-api-calls` and `--explain-workers`. This is convenient for small batches, but it can be time-consuming for large submissions because model inference and API calls run in the same workflow.
-
-To reduce total inference time, the recommended workflow is to first run `infer_submission.py` with API calls disabled or limited, which quickly produces prediction JSON files and mask PNG files. Then run `update_json_traces.py` as a second-stage refinement step to update the `Visible forgery traces` field in the generated JSON files without rerunning model inference.
-
-## Second-Stage Trace Refinement
-
-After `infer_submission.py`, optionally refine the `Visible forgery traces` field without overwriting the original JSON folder:
-
-```bash
 bash update_submission_new.sh
 ```
 
-This script reads `outputs/test/json/` and `outputs/test/mask/`, then writes refined JSON files to `json_api_refined/`.
+Edit the input paths and API settings in the launcher first. The launcher selects `qwen3.5-flash`; the Python script defaults to `qwen3.6-plus`. Record the model identifier and API settings used for an experiment. Both use the configured OpenAI-compatible endpoint; an API key can also be supplied with `--explain-api-key`.
+
+This stage reads `outputs/test/json/` and `outputs/test/mask/` and writes to `outputs/test/json_api_refined/` by default. Use `--new-json-dir` to choose a different destination; the source JSON directory cannot be used as the destination. Only `Visible forgery traces` is updated; classification, bounding boxes, and other fields are preserved.
+
+The API is used for both real and fake predictions. Fake predictions use the original image, mask overlay, and a crop when the mask is nonempty. Real predictions are also described, including when no mask is available. A fake prediction with a missing mask is copied unchanged. API failures or empty responses retain the previous description with a classification summary appended.
+
+`--explain-workers` controls concurrency and `--max-api-calls` limits application-level requests (the client may retry requests). `--dry-run` suppresses output JSON writes but still calls the API and writes logs and a run summary; use `--max-api-calls 0` as well for a preview without API requests.
+
+API descriptions are conditioned on model predictions and should not be treated as ground-truth annotations. External weights and datasets are distributed separately from this source repository.
