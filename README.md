@@ -98,6 +98,30 @@ bash synthscars_test/test.sh logs/synthscars/last.ckpt outputs/synthscars_test
 
 Evaluation reports foreground/background mIoU and foreground F1.
 
+After localization, generate and score explanations:
+
+```bash
+# Set DASHSCOPE_API_KEY in your environment (do not commit API credentials).
+bash synthscars_test/explain.sh
+bash synthscars_test/score_explanations.sh
+```
+
+Generation uses Qwen3.5-Flash with temperature 0 and a 500-token response limit.
+The API receives the original image followed by up to four crops from predicted-mask
+components, then the fixed prompt; no mask, overlay, predicted label, or reference
+caption is sent. Eight-connected components smaller than 8 pixels are discarded;
+the four largest are kept without merging. Each box is padded on each side by
+`max(8, side // 3)` pixels and clipped to the image. Crops with a side at most 10
+pixels are skipped; smaller remaining crops are enlarged with Lanczos to a minimum
+side of 128 pixels. JSON responses are deterministically rendered into explanations.
+Completed samples are retained for resume. API requests may incur charges.
+
+Scoring uses the top-level reference caption, whitespace-token ROUGE-L F1 and cosine
+similarity from `sentence-transformers/paraphrase-MiniLM-L6-v2`, both scaled by 100.
+The CSS encoder is downloaded on first use, or set `CSS_MODEL` to a local copy under
+`weights/`. Re-running the external API or using different localization masks may
+change the scores.
+
 ## Main Results
 
 The following PATE-Forensics results are reported in the paper, not obtained from runtime smoke tests. Values retain the scales used in the paper.

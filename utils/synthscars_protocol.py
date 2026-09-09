@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Sequence
@@ -67,3 +68,28 @@ def metrics_from_confusion(c: dict[str, int]) -> dict[str, float]:
 
 def sum_confusions(rows: Iterable[dict[str, int]]) -> dict[str, int]:
     return {key: sum(row[key] for row in rows) for key in ("tp", "fp", "fn", "tn")}
+
+
+def normalize_text(text: str) -> str:
+    """Identical deterministic preprocessing for reference and prediction."""
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def reference_explanation(record: Record) -> str:
+    return normalize_text(record.caption)
+
+
+def rouge_l_f1(prediction: str, reference: str) -> float:
+    """Token-level ROUGE-L F1 (LCS), with shared whitespace normalization."""
+    a, b = normalize_text(prediction).split(), normalize_text(reference).split()
+    if not a or not b:
+        return float(a == b)
+    previous = [0] * (len(b) + 1)
+    for token in a:
+        current = [0]
+        for j, other in enumerate(b, 1):
+            current.append(previous[j - 1] + 1 if token == other else max(previous[j], current[-1]))
+        previous = current
+    lcs = previous[-1]
+    precision, recall = lcs / len(a), lcs / len(b)
+    return 2 * precision * recall / (precision + recall) if precision + recall else 0.0
