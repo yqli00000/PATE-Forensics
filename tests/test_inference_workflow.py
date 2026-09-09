@@ -1,7 +1,7 @@
 """CPU regression checks with synthetic predictions and a mocked API client.
 
 Run: python -m unittest discover -s tests -v
-Optional: PATE_BASELINE_PATH=/path/to/old/infer_submission.py enables old/new comparison.
+Optional: PATE_BASELINE_PATH=baseline/infer_submission.py enables old/new comparison.
 """
 import importlib.util
 import json

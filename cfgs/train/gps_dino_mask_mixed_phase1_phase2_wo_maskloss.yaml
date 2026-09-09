@@ -8,7 +8,7 @@ model:
   agglomerative_num_clusters: 32
   mask_hidden_dim: 256
   dropout: 0.1
-  backbone0: "/home/data/liyaqid/modelcode/AID-main-end/weights/dinov3-l16"
+  backbone0: weights/dinov3-l16
   backbone1: 1024
   patch_size: 16
   layer_indices: [5, 11, 17, 23]
@@ -50,7 +50,7 @@ train:
   seed: 42
   gpu_ids: [0]
   accelerator: gpu
-  train_epochs: 10
+  train_epochs: 20
   warmup_epochs: 1
   check_val_every_n_epoch: 1
   precision: "16-mixed"
@@ -100,9 +100,9 @@ train:
 datasets:
   train:
     target: data.DDLMixedDataset
-    phase1_train_root: /home/data/liyaqid/DATASET_DDL/phase1/track1_inner/track1/train
-    phase1_valid_root: /home/data/liyaqid/DATASET_DDL/phase1/track1_inner/track1/valid
-    phase2_test_root: /home/data/liyaqid/DATASET_DDL/phase2/track1/test
+    phase1_train_root: datasets/phase1/track1_inner/track1/train
+    phase1_valid_root: datasets/phase1/track1_inner/track1/valid
+    phase2_test_root: datasets/phase2/track1/test
     image_size: 512
     gps_style_augment: true
     min_size: 384
@@ -131,7 +131,7 @@ datasets:
     persistent_workers: false
   val:
     target: data.DDLMixedDataset
-    phase2_test_root: /home/data/liyaqid/DATASET_DDL/phase2/track1/test
+    phase2_test_root: datasets/phase2/track1/test
     image_size: 512
     gps_style_augment: false
     canvas_augment: true

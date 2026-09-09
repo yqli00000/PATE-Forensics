@@ -1,0 +1,125 @@
+arch: GPSDINOMaskModel
+name: gps_dino_synthscars_localization
+
+model:
+  feature_dim: 1024
+  nproj: 2
+  proj_dim: 1024
+  agglomerative_num_clusters: 32
+  mask_hidden_dim: 256
+  dropout: 0.1
+  backbone0: weights/dinov3-l16
+  backbone1: 1024
+  patch_size: 16
+  layer_indices: [5, 11, 17, 23]
+  cluster_tau: 0.9
+  reducer_hidden_dim: 256
+  reducer_temperature: 0.07
+  topk_ratio: 0.05
+  mask_target_threshold: 0.1
+  classification_loss: focal
+  loss_weights:
+    main: 1.0
+    global_branch: 1.0
+    patch_branch: 1.0
+    segment_branch: 1.0
+    cluster_mask: 1.0
+    decoder_mask: 1.0
+    decoder_pos_weight: 5.0
+    edge: 0.0
+    edge_width: 3
+    bbox_mask: 0.0
+    bbox_boundary: 0.0
+    bbox_outside: 0.0
+  hf_local_files_only: true
+  lora:
+    enabled: true
+    rank: 32
+    alpha: 16
+    dropout: 0.05
+    train_bias: false
+    verbose: false
+    print_trainable_params: true
+    target_blocks: all
+    target_modules: [attention.q_proj, attention.v_proj]
+
+train:
+  pipeline: engine.SynthScarsTrainer
+  seed: 2026
+  gpu_ids: [0]
+  accelerator: gpu
+  strategy: ddp_find_unused_parameters_true
+  find_unused_parameters: true
+  train_epochs: 20
+  warmup_epochs: 1
+  check_val_every_n_epoch: 1
+  precision: 16-mixed
+  monitor: val_miou_best_epoch
+  monitor_mode: max
+  save_top_k: -1
+  pretrained: null
+  classification_checkpoint: weights/model_best.ckpt
+  bbox_eval:
+    fake_threshold: 0.5
+    mask_threshold: 0.5
+    min_box_area: 8
+    mask_thresholds: [0.5]
+    min_box_areas: [8]
+  segmentation_eval:
+    mask_thresholds: [0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90]
+  log_every_n_steps: 10
+  accumulation_steps: 1
+  gradient_clip_val: 1.0
+  gradient_clip_algorithm: norm
+  scheduler_interval: step
+  head_lr_ratio: 10.0
+  token_head_lr_ratio: 0.1
+  zero_wd_for_norm: true
+  eta_min: 1.0e-7
+  optimizer:
+    _target_: torch.optim.AdamW
+    _partial_: true
+    lr: 5.0e-6
+    weight_decay: 0.05
+    betas: [0.9, 0.999]
+  scheduler:
+    clamp_progress: true
+    _target_: utils.lr_schedulers.WarmupCosineScheduler
+    _partial_: true
+  wandb:
+    enabled: false
+    project: DDL-SynthScars
+    mode: online
+    log_model: false
+    num_val_images: 8
+    log_val_images_every_n_epochs: 1
+    tags: [SynthScars, localization, in-domain]
+  local_val_visuals:
+    enabled: true
+    dir: null
+    num_val_images: 12
+    every_n_epochs: 1
+
+datasets:
+  train:
+    target: data.synthscars_dataset.SynthScarsTrainDataset
+    root: datasets/SynthScars
+    image_size: 512
+    val_ratio: 0.1
+    split_seed: 2026
+    batch_size: 8
+    loader_workers: 4
+    pin_memory: true
+    persistent_workers: true
+    prefetch_factor: 2
+  val:
+    target: data.synthscars_dataset.SynthScarsTrainDataset
+    root: datasets/SynthScars
+    image_size: 512
+    val_ratio: 0.1
+    split_seed: 2026
+    batch_size: 8
+    loader_workers: 2
+    pin_memory: true
+    persistent_workers: true
+    prefetch_factor: 2

@@ -43,7 +43,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--summary-json", default=None, help="Write run summary here. Defaults to output-dir/infer_summary.json.")
     parser.add_argument("--score-jsonl", default=None, help="Write per-image logits/probabilities here. Defaults to output-dir/infer_scores.jsonl.")
     parser.add_argument("--reuse-existing-traces", action="store_true")
-    parser.add_argument("--backbone-path", default=None, help="Override DINOv3 backbone path saved in checkpoint.")
+    parser.add_argument("--backbone-path", default="weights/dinov3-l16", help="DINOv3 backbone directory, relative to the repository root; overrides the path saved in checkpoint.")
     return parser.parse_args()
 
 

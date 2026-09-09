@@ -296,7 +296,8 @@ def compute_ddl_losses(
         gt_mask = labels["mask"].float()
         pred_fake = outputs["pred_mask_logits"][fake_mask]
         gt_fake = gt_mask[fake_mask]
-        loss_decoder_mask = F.binary_cross_entropy_with_logits(pred_fake, gt_fake) + dice_loss_with_logits(
+        pos_weight = pred_fake.new_tensor(float(w.decoder_pos_weight))
+        loss_decoder_mask = F.binary_cross_entropy_with_logits(pred_fake, gt_fake, pos_weight=pos_weight) + dice_loss_with_logits(
             pred_fake,
             gt_fake,
         )

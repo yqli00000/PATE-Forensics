@@ -10,7 +10,7 @@ OUTPUT_DIR="outputs/test"
 
 # Choose one image input source:
 IMAGE_PATH=""
-IMAGE_DIR="DATASET_DDL/DDL_X_test/image"
+IMAGE_DIR="datasets/DDL_X_test/image"
 
 # DashScope / OpenAI-compatible explanation API settings.
 EXPLAIN_API_URL="https://dashscope.aliyuncs.com/compatible-mode/v1"

@@ -1,5 +1,8 @@
 import os
+from collections.abc import Mapping
 from functools import partial
+from pathlib import Path
+from typing import Any
 
 import lightning as L
 import torch
@@ -8,6 +11,48 @@ from omegaconf import OmegaConf
 from utils.network_factory import get_model
 from utils.lr_schedulers import WarmupCosineScheduler
 from utils.pretrained_loader import load_partial_pretrained
+
+
+def _qualified_name(value: Any) -> str:
+    module = getattr(value, "__module__", None)
+    name = getattr(value, "__qualname__", None) or getattr(value, "__name__", None)
+    if module and name:
+        return f"{module}.{name}"
+    return str(value)
+
+
+def _make_hparams_yaml_safe(value: Any) -> Any:
+    """Convert Hydra-instantiated objects into values that PyYAML can serialize."""
+
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, Path):
+        return str(value)
+    if OmegaConf.is_config(value):
+        return _make_hparams_yaml_safe(OmegaConf.to_container(value, resolve=True))
+    if isinstance(value, partial):
+        return {
+            "_type_": "functools.partial",
+            "func": _qualified_name(value.func),
+            "args": [_make_hparams_yaml_safe(item) for item in value.args],
+            "keywords": {
+                str(key): _make_hparams_yaml_safe(item)
+                for key, item in (value.keywords or {}).items()
+            },
+        }
+    if isinstance(value, Mapping):
+        return {
+            str(key): _make_hparams_yaml_safe(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple, set)):
+        return [_make_hparams_yaml_safe(item) for item in value]
+    if callable(value):
+        return {
+            "_type_": "callable",
+            "path": _qualified_name(value),
+        }
+    return str(value)
 
 
 class Trainer(L.LightningModule):
@@ -36,7 +81,7 @@ class Trainer(L.LightningModule):
         except Exception:
             serialized_opt = None
         if serialized_opt is not None:
-            self.save_hyperparameters({"opt": serialized_opt})
+            self.save_hyperparameters({"opt": _make_hparams_yaml_safe(serialized_opt)})
 
     def configure_optimizers(self):
         optimizer_factory = self.opt.train.optimizer

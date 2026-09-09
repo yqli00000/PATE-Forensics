@@ -174,7 +174,7 @@ if __name__ == "__main__":
     launched_with_torchrun = world_size > 1 and os.getenv("LOCAL_RANK") is not None and rank is not None
 
     if os.getenv("LOCAL_RANK", "0") == "0" and not launched_with_torchrun:
-        archive_files(run_name, exclude_dirs=["logs", ".git", "__pycache__", "outputs"])
+        archive_files(run_name, exclude_dirs=["logs", ".git", "__pycache__", "outputs", "weights", "datasets"])
 
     monitor = getattr(conf.train, "monitor", "val_acc_epoch")
     monitor_mode = getattr(conf.train, "monitor_mode", "max")
@@ -182,7 +182,7 @@ if __name__ == "__main__":
         monitor=monitor,
         dirpath=run_dir,
         filename="{epoch:02d}-{" + monitor + ":.4f}",
-        save_top_k=1,
+        save_top_k=int(getattr(conf.train, "save_top_k", 1)),
         save_last=True,
         mode=monitor_mode,
     )

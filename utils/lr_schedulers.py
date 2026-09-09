@@ -14,11 +14,13 @@ class WarmupCosineScheduler(LRScheduler):
         warmup_steps: int,
         total_steps: int,
         eta_min: float = 1e-9,
+        clamp_progress: bool = False,
         last_epoch: int = -1,
     ) -> None:
         self.warmup_steps = max(0, int(warmup_steps))
         self.total_steps = max(1, int(total_steps))
         self.eta_min = float(eta_min)
+        self.clamp_progress = bool(clamp_progress)
         super().__init__(optimizer, last_epoch=last_epoch)
 
     def get_lr(self):
@@ -29,6 +31,8 @@ class WarmupCosineScheduler(LRScheduler):
                 lr = base_lr * float(step + 1) / float(self.warmup_steps + 1)
             else:
                 progress = float(step - self.warmup_steps) / float(max(1, self.total_steps - self.warmup_steps))
+                if self.clamp_progress:
+                    progress = min(1.0, max(0.0, progress))
                 lr = self.eta_min + (base_lr - self.eta_min) * 0.5 * (1.0 + math.cos(math.pi * progress))
             lrs.append(lr)
         return lrs

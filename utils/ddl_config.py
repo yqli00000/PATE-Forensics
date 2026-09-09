@@ -12,6 +12,7 @@ class DDLLossWeights:
     segment_branch: float = 1.0
     cluster_mask: float = 1.0
     decoder_mask: float = 1.0
+    decoder_pos_weight: float = 1.0
     bbox_mask: float = 0.0
     bbox_boundary: float = 0.0
     bbox_outside: float = 0.0

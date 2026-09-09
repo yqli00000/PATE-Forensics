@@ -1,0 +1,100 @@
+arch: GPSDINOMaskModel
+name: gps_dino_opensdi
+
+# The current DDL backbone, detection branches, localization decoder and losses
+# are retained. Only the dataset/protocol is changed to OpenSDI.
+model:
+  feature_dim: 1024
+  nproj: 2
+  proj_dim: 1024
+  agglomerative_num_clusters: 32
+  mask_hidden_dim: 256
+  dropout: 0.1
+  backbone0: weights/dinov3-l16
+  backbone1: 1024
+  patch_size: 16
+  layer_indices: [5, 11, 17, 23]
+  cluster_tau: 0.9
+  reducer_hidden_dim: 256
+  reducer_temperature: 0.07
+  topk_ratio: 0.05
+  mask_target_threshold: 0.1
+  classification_loss: focal
+  loss_weights:
+    main: 1.0
+    global_branch: 1.0
+    patch_branch: 1.0
+    segment_branch: 1.0
+    cluster_mask: 1.0
+    decoder_mask: 1.0
+    decoder_pos_weight: 5.0
+    edge: 0.0
+    bbox_mask: 0.0
+    bbox_boundary: 0.0
+    bbox_outside: 0.0
+  hf_local_files_only: true
+  lora:
+    enabled: true
+    rank: 32
+    alpha: 16
+    dropout: 0.05
+    train_bias: false
+    verbose: false
+    print_trainable_params: true
+    target_blocks: all
+    target_modules: [attention.q_proj, attention.v_proj]
+
+train:
+  pipeline: engine.ddl_trainer
+  seed: 42
+  gpu_ids: [0, 1, 2, 3]
+  accelerator: gpu
+  strategy: ddp
+  train_epochs: 20
+  warmup_epochs: 0
+  check_val_every_n_epoch: 1
+  precision: 16-mixed
+  monitor: val_mask_iou_epoch
+  monitor_mode: max
+  log_every_n_steps: 20
+  accumulation_steps: 1
+  gradient_clip_val: 1.0
+  gradient_clip_algorithm: norm
+  scheduler_interval: step
+  head_lr_ratio: 10.0
+  token_head_lr_ratio: 0.1
+  zero_wd_for_norm: true
+  eta_min: 1.0e-9
+  optimizer:
+    _target_: torch.optim.AdamW
+    _partial_: true
+    lr: 1.0e-4
+    weight_decay: 0.05
+    betas: [0.95, 0.999]
+  scheduler:
+    _target_: utils.lr_schedulers.WarmupCosineScheduler
+    _partial_: true
+  bbox_eval:
+    fake_threshold: 0.5
+    mask_threshold: 0.5
+    min_box_area: 16
+    mask_thresholds: [0.5]
+    min_box_areas: [16]
+  wandb:
+    enabled: false
+  local_val_visuals:
+    enabled: false
+
+opensdi_datamodule:
+  root: datasets/OpenSDI
+  image_size: 512
+  augmentation: paper
+  batch_size: 16
+  val_batch_size: 16
+  num_workers: 4
+  val_num_workers: 2
+  pin_memory: true
+  persistent_workers: true
+  seed: 42
+  train_limit: null
+  val_limit: null

@@ -12,3 +12,4 @@ tqdm==4.69.1
 openai==2.48.0
 transformers==5.14.1
 wandb==0.28.1
+pyarrow==19.0.1

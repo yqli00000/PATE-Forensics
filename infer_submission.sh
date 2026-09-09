@@ -13,7 +13,7 @@ OUTPUT_DIR="outputs/test"
 # Choose one image input source:
 IMAGE_PATH=""
 # or the test image folder
-IMAGE_DIR="DATASET_DDL/DDL_X_test/image"
+IMAGE_DIR="datasets/DDL_X_test/image"
 
 IMAGE_SIZE=768
 BATCH_SIZE=4
@@ -40,7 +40,7 @@ CMD=(
   --mask-threshold "${MASK_THRESHOLD}"
   --min-box-area "${MIN_BOX_AREA}"
   --save-mask-png
-  # --backbone-path "weights/dinov3-l16"  # optional; you can replace it to match the target machine.
+  --backbone-path "weights/dinov3-l16"
 )
 
 if [[ "${REUSE_EXISTING_TRACES}" == "true" ]]; then
