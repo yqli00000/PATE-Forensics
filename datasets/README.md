@@ -2,7 +2,6 @@
 
 Datasets are not included in this repository. Prepare them separately and place
 them in the directories below. All paths are relative to the repository root;
-run Python commands from that root. No symbolic links are required.
 
 ## DDL-X
 
